@@ -1,0 +1,206 @@
+blueprint:
+  name: Bambu Lab - Auto power-down
+  author: pleasantone
+  description: >
+    Cuts power to an idle printer through its smart plug, after a warning.
+
+
+    It powers down once the printer has been idle for a while (4 hours by default) **and** is
+    drawing idle-level power. It warns you first, waits, then checks everything again before
+    cutting power, so a print started during the warning doesn't get killed in prepare.
+
+
+    Safety checks:
+
+    - **Power sensor unreadable?** It notifies and leaves the printer on. An unavailable power
+    sensor never counts as idle.
+
+    - **AMS drying?** Give it the drying binary sensors and it won't cut power while any of them
+    is on, or unknown. It checks both before the warning and after it.
+
+    - **Optional kill switch**: an `input_boolean` that has to be on for power-down to happen.
+
+
+    Set the idle-power threshold for your printer. Measure its idle draw on your plug's meter
+    and pick something comfortably above it but well below printing power. Mine: X1C idles
+    ~11 W (threshold 20 W), H2C idles 20-36 W depending on the airduct (threshold 45 W).
+  domain: automation
+  source_url: https://github.com/pleasantone/ha-bambulab-blueprints/blob/main/blueprints/automation/pleasantone/bambu_auto_power_down.yaml
+  homeassistant:
+    min_version: 2025.1.0
+  input:
+    printer_section:
+      name: Printer
+      icon: mdi:printer-3d
+      input:
+        current_stage:
+          name: Current stage
+          description: The printer's current stage sensor (`sensor.<printer>_current_stage`).
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+        plug:
+          name: Smart plug
+          description: The switch that powers the printer.
+          selector:
+            entity:
+              filter:
+                - domain: switch
+        power_sensor:
+          name: Power sensor
+          description: The plug's power reading, in watts.
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+                  device_class: power
+        idle_power:
+          name: Idle power threshold
+          description: Only power down while the printer draws less than this.
+          default: 20
+          selector:
+            number: {min: 1, max: 500, step: 1, unit_of_measurement: W, mode: box}
+        drying_sensors:
+          name: AMS drying sensors (optional)
+          description: >
+            Every AMS drying binary sensor on this printer. Power-down only happens while all of
+            them are `off`. Include the AMS units with their own power supply too: they still
+            need the printer on to dry.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain: binary_sensor
+    timing_section:
+      name: Timing
+      icon: mdi:timer-outline
+      input:
+        idle_time:
+          name: Idle time
+          description: How long the printer has to be idle first.
+          default: {hours: 4, minutes: 0, seconds: 0}
+          selector:
+            duration: {}
+        warning_time:
+          name: Warning time
+          description: Time between the warning and cutting power.
+          default: {hours: 0, minutes: 2, seconds: 0}
+          selector:
+            duration: {}
+        enable_toggle:
+          name: Enable toggle (optional)
+          description: An input_boolean that must be on for power-down to happen.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: input_boolean
+    notify_section:
+      name: Notifications
+      icon: mdi:bell
+      input:
+        notify_action:
+          name: Notification action
+          description: >
+            Runs for the warning and for the skip/cancel cases. These variables are available:
+            `notify_title`, `notify_message`, `notify_tag` (one per plug, so a newer power
+            notification replaces the older one), `notify_event` (`warning`, `skipped` or
+            `cancelled`).
+          default: []
+          selector:
+            action: {}
+
+mode: single
+
+variables:
+  stage_entity: !input current_stage
+  plug_entity: !input plug
+  power_entity: !input power_sensor
+  idle_power: !input idle_power
+  drying: !input drying_sensors
+  toggle_entity: !input enable_toggle
+  warning_time: !input warning_time
+  notify_tag: "power_{{ plug_entity.split('.')[1] }}"
+  warning_text: >-
+    {% set s = (warning_time.hours | default(0)) * 3600 + (warning_time.minutes | default(0)) * 60
+               + (warning_time.seconds | default(0)) %}
+    {{- s ~ ' s' if s < 60 else ((s / 60) | round(1) | string | replace('.0', '')) ~ ' min' }}
+
+triggers:
+  - trigger: state
+    entity_id: !input current_stage
+    to: idle
+    for: !input idle_time
+
+conditions:
+  - alias: Enable toggle on (or none configured)
+    condition: template
+    value_template: "{{ not toggle_entity or is_state(toggle_entity, 'on') }}"
+  - alias: No AMS drying (unknown/unavailable also blocks)
+    condition: template
+    value_template: "{{ drying | reject('is_state', 'off') | list | count == 0 }}"
+
+actions:
+  - alias: "Guard: power unreadable - notify, never silently skip"
+    if:
+      - condition: template
+        value_template: "{{ not is_number(states(power_entity)) }}"
+    then:
+      - variables:
+          notify_event: skipped
+          notify_title: Auto power-down skipped
+          notify_message: >-
+            Power sensor {{ power_entity }} reads '{{ states(power_entity) }}', so I can't
+            confirm the printer is idle. Left it on.
+      - choose: []
+        default: !input notify_action
+      - stop: Power reading unavailable
+
+  - alias: Idle power check
+    condition: template
+    value_template: "{{ states(power_entity) | float < idle_power }}"
+
+  - variables:
+      notify_event: warning
+      notify_title: Auto power-down
+      notify_message: >-
+        Printer has been idle for {{ relative_time(states[stage_entity].last_changed) }}.
+        Powering down in {{ warning_text }} to save energy.
+  - choose: []
+    default: !input notify_action
+
+  - delay: !input warning_time
+
+  - alias: Re-check everything after the warning (a print or dry cycle may have started)
+    if:
+      - condition: or
+        conditions:
+          - condition: template
+            value_template: "{{ drying | reject('is_state', 'off') | list | count > 0 }}"
+          - condition: template
+            value_template: "{{ not is_state(stage_entity, 'idle') }}"
+          - condition: template
+            value_template: >-
+              {{ not is_number(states(power_entity)) or states(power_entity) | float >= idle_power }}
+    then:
+      - variables:
+          notify_event: cancelled
+          notify_title: Auto power-down cancelled
+          notify_message: >-
+            The printer became active during the warning (stage '{{ states(stage_entity) }}',
+            {{ states(power_entity) }} W{{ ', AMS drying' if drying | reject('is_state', 'off')
+            | list | count > 0 else '' }}). Left it on.
+      - choose: []
+        default: !input notify_action
+      - stop: Printer became active during the warning
+
+  - action: switch.turn_off
+    target:
+      entity_id: !input plug
+  - action: logbook.log
+    data:
+      name: Auto power-down
+      message: "Printer powered off after being idle (energy saving)"
+      entity_id: "{{ plug_entity }}"
