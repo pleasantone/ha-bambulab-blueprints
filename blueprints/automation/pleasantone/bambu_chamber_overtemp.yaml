@@ -1,0 +1,152 @@
+blueprint:
+  name: Bambu Lab - Chamber over-temperature safety
+  author: pleasantone
+  description: >
+    Second-layer protection for a third-party chamber heater. If the chamber stays above the
+    limit, it shuts the heater off, runs your fans and tells you about it.
+
+
+    **This is not your only protection.** The heater still needs its own thermostat or thermal
+    fuse. HA can't read the chamber while the printer is offline, and HA itself can be down.
+
+
+    Printers with a stock Bambu chamber heater (H2D/H2C/H2S) handle over-temperature themselves.
+    You don't need this there.
+
+
+    What it does, in order, while the chamber is above the limit:
+
+    1. Turns the heater(s) off.
+
+    2. Turns on every fan you list: at 100% for fans that support speed, plain on for the rest
+    (e.g. a window exhaust on a switch).
+
+    3. Notifies you once, when it first trips.
+
+
+    It re-applies steps 1 and 2 every minute until the chamber is back under the limit,
+    because the printer firmware manages its own chamber fan and other automations may switch
+    your fans off. It never turns the heater back on; that's up to your heater control.
+    Each step carries on even if another fails, so an unavailable fan can't stop the heater
+    shutoff.
+  domain: automation
+  source_url: https://github.com/pleasantone/ha-bambulab-blueprints/blob/main/blueprints/automation/pleasantone/bambu_chamber_overtemp.yaml
+  homeassistant:
+    min_version: 2025.1.0
+  input:
+    chamber_temp:
+      name: Chamber temperature
+      description: "`sensor.<printer>_chamber_temperature`"
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+    limit:
+      name: Limit
+      default: 65
+      selector:
+        number: {min: 30, max: 100, step: 1, unit_of_measurement: °C, mode: box}
+    limit_for:
+      name: Above the limit for
+      default: {hours: 0, minutes: 0, seconds: 30}
+      selector:
+        duration: {}
+    heaters:
+      name: Heater(s) to turn off
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain:
+                - switch
+                - input_boolean
+    fans:
+      name: Fans to turn on (optional)
+      description: >
+        E.g. the printer's chamber fan and a window exhaust. Fans with speed control are set to
+        100%.
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain:
+                - fan
+                - switch
+                - input_boolean
+    notify_action:
+      name: Notification action
+      description: >
+        Runs once when it first trips. Variables: `notify_title`, `notify_message`,
+        `notify_tag`, `temperature`, `limit`. Make this one high priority.
+      default: []
+      selector:
+        action: {}
+
+mode: single
+
+variables:
+  chamber_entity: !input chamber_temp
+  limit: !input limit
+  fans: !input fans
+  notify_tag: "overtemp_{{ chamber_entity.split('.')[1] }}"
+
+triggers:
+  - trigger: numeric_state
+    entity_id: !input chamber_temp
+    above: !input limit
+    for: !input limit_for
+    id: over
+  - trigger: time_pattern
+    minutes: /1
+    id: recheck
+
+conditions:
+  - condition: numeric_state
+    entity_id: !input chamber_temp
+    above: !input limit
+
+actions:
+  - alias: Heater(s) off first
+    action: homeassistant.turn_off
+    target:
+      entity_id: !input heaters
+    continue_on_error: true
+  - alias: Fans on (100% where speed is supported)
+    repeat:
+      for_each: "{{ fans }}"
+      sequence:
+        - if:
+            - condition: template
+              value_template: >-
+                {{ repeat.item.startswith('fan.')
+                   and (state_attr(repeat.item, 'supported_features') | int(0)) | bitwise_and(1) > 0 }}
+          then:
+            - action: fan.turn_on
+              target:
+                entity_id: "{{ repeat.item }}"
+              data:
+                percentage: 100
+              continue_on_error: true
+          else:
+            - action: homeassistant.turn_on
+              target:
+                entity_id: "{{ repeat.item }}"
+              continue_on_error: true
+  - if:
+      - condition: trigger
+        id: over
+    then:
+      - variables:
+          temperature: "{{ states(chamber_entity) | float(0) }}"
+          notify_title: Chamber over-temperature
+          notify_message: >-
+            Chamber at {{ temperature | round(1) }} °C (limit {{ limit }} °C). Heater off, fans on.
+            I'll keep them that way until it's back under {{ limit }} °C.
+      - choose: []
+        default: !input notify_action
+      - action: logbook.log
+        data:
+          name: Chamber over-temperature
+          message: "Chamber {{ temperature }} °C above {{ limit }} °C: heater off, fans on"
+          entity_id: "{{ chamber_entity }}"

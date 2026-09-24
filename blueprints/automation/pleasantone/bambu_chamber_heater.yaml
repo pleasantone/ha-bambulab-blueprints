@@ -1,0 +1,186 @@
+blueprint:
+  name: Bambu Lab - Third-party chamber heater control
+  author: pleasantone
+  description: >
+    Runs a bolt-on chamber heater (BambuSauna and friends) on a smart plug or relay for
+    high-temperature prints, and makes sure it's off whenever the printer isn't actually printing.
+
+
+    **This is not a safety device.** Your heater needs its own thermostat or thermal fuse. Pair
+    this with the *Chamber over-temperature safety* blueprint as a second layer, not as a
+    replacement.
+
+
+    **On:** the bed target goes above the threshold (90 °C-ish means ABS/ASA territory) and the
+    chamber is still below the "don't start above" temperature. It also turns on if the chamber
+    sensor is unavailable at that moment.
+
+
+    **Off**, whichever comes first:
+
+    - the print ends (finish / failed / idle), from any state, so a cancel during prepare or
+    while paused counts too
+
+    - the bed target drops below the "off" threshold (a manual preheat you turned off)
+
+    - the heater has been on for a while with the printer idle/finished/failed (a manual preheat
+    you forgot about)
+
+    - the printer has been **offline or unavailable for an hour**. A printer that drops off
+    the network mid-print keeps printing, so a shorter window would cool the chamber under a
+    live print. A network drop never counts as "not printing" for the other exits.
+  domain: automation
+  source_url: https://github.com/pleasantone/ha-bambulab-blueprints/blob/main/blueprints/automation/pleasantone/bambu_chamber_heater.yaml
+  homeassistant:
+    min_version: 2025.1.0
+  input:
+    printer_section:
+      name: Printer
+      icon: mdi:printer-3d
+      input:
+        print_status:
+          name: Print status
+          description: The printer's print status sensor (`sensor.<printer>_print_status`).
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+        bed_target:
+          name: Bed target temperature
+          description: "`sensor.<printer>_bed_target_temperature`"
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+        chamber_temp:
+          name: Chamber temperature
+          description: "`sensor.<printer>_chamber_temperature`"
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+    heater_section:
+      name: Heater
+      icon: mdi:heat-wave
+      input:
+        heater:
+          name: Heater switch
+          selector:
+            entity:
+              filter:
+                - domain:
+                    - switch
+                    - input_boolean
+        on_bed_target:
+          name: Turn on when the bed target goes above
+          default: 89
+          selector:
+            number: {min: 40, max: 130, step: 1, unit_of_measurement: °C, mode: box}
+        max_start_chamber:
+          name: Don't start above this chamber temperature
+          default: 55
+          selector:
+            number: {min: 20, max: 80, step: 1, unit_of_measurement: °C, mode: box}
+        off_bed_target:
+          name: Turn off when the bed target drops below
+          default: 60
+          selector:
+            number: {min: 0, max: 120, step: 1, unit_of_measurement: °C, mode: box}
+    timing_section:
+      name: Timing
+      icon: mdi:timer-outline
+      collapsed: true
+      input:
+        end_delay:
+          name: Delay after the print ends
+          default: {hours: 0, minutes: 1, seconds: 0}
+          selector:
+            duration: {}
+        idle_backstop:
+          name: Off if on this long with the printer idle
+          default: {hours: 0, minutes: 10, seconds: 0}
+          selector:
+            duration: {}
+        offline_grace:
+          name: Off if the printer is offline/unavailable this long
+          default: {hours: 1, minutes: 0, seconds: 0}
+          selector:
+            duration: {}
+
+mode: single
+
+variables:
+  heater_entity: !input heater
+  chamber_entity: !input chamber_temp
+  max_start_chamber: !input max_start_chamber
+
+triggers:
+  - trigger: numeric_state
+    entity_id: !input bed_target
+    above: !input on_bed_target
+    id: "on"
+  - trigger: state
+    entity_id: !input print_status
+    to: [finish, failed, idle]
+    for: !input end_delay
+    id: print_ended
+  - trigger: state
+    entity_id: !input print_status
+    to: [offline, unavailable]
+    for: !input offline_grace
+    id: offline
+  - trigger: numeric_state
+    entity_id: !input bed_target
+    below: !input off_bed_target
+    for: !input end_delay
+    id: bed_target_low
+  - trigger: state
+    entity_id: !input heater
+    to: "on"
+    for: !input idle_backstop
+    id: on_without_print
+
+actions:
+  - choose:
+      - alias: Turn on for a hot print
+        conditions:
+          - condition: trigger
+            id: "on"
+          - condition: template
+            value_template: >-
+              {{ not is_number(states(chamber_entity))
+                 or states(chamber_entity) | float < max_start_chamber }}
+        sequence:
+          - action: homeassistant.turn_on
+            target:
+              entity_id: !input heater
+          - action: logbook.log
+            data:
+              name: Chamber heater
+              message: "Turned on: bed target above threshold, chamber {{ states(chamber_entity) }}"
+              entity_id: "{{ heater_entity }}"
+
+      - alias: Turn off - the printer is genuinely not printing
+        conditions:
+          - condition: state
+            entity_id: !input heater
+            state: "on"
+          - condition: or
+            conditions:
+              # Offline/unavailable only turns the heater off through its own long timer.
+              - condition: trigger
+                id: offline
+              - condition: state
+                entity_id: !input print_status
+                state: [finish, failed, idle]
+          - condition: trigger
+            id: [print_ended, offline, bed_target_low, on_without_print]
+        sequence:
+          - action: homeassistant.turn_off
+            target:
+              entity_id: !input heater
+          - action: logbook.log
+            data:
+              name: Chamber heater
+              message: "Turned off ({{ trigger.id }})"
+              entity_id: "{{ heater_entity }}"
