@@ -1,0 +1,329 @@
+blueprint:
+  name: Bambu Lab - Print notifications
+  author: pleasantone
+  description: >
+    Notifications for one printer: print finished, print failed, print canceled, print error and
+    HMS errors, with an optional camera snapshot when a print fails.
+
+
+    You pick the printer once. It listens to the integration's own events and finds the task,
+    time and weight sensors through the device, so there's no entity list to maintain.
+
+
+    **Duplicate suppression:** if your printer is cloud-connected, the Bambu app already sends
+    these. Give it your `developer_lan_mode` binary sensor and it only notifies while LAN
+    developer mode is on, i.e. when the app can't.
+
+
+    **One incident, one notification:** a failed print often raises a print error too. The
+    "failed" notification waits a few seconds and stands down if the print error already
+    covered it. Outcome notifications share one tag per printer, so a newer outcome replaces
+    an older one. HMS errors get a tag per error code, so a repeat of the same code replaces
+    itself but a print outcome never wipes an HMS error.
+
+
+    **Snapshots:** optional. They're written under `/config/www/<folder>/` and served at
+    `/local/<folder>/...`, which **doesn't need a login**. The random token in the file name is
+    the only thing keeping those URLs private, so make it long and random. File names reuse a
+    day-of-month + hour slot, so the folder can't grow forever. The folder has to be in
+    `allowlist_external_dirs`.
+  domain: automation
+  source_url: https://github.com/pleasantone/ha-bambulab-blueprints/blob/main/blueprints/automation/pleasantone/bambu_print_notifications.yaml
+  homeassistant:
+    min_version: 2025.4.0
+  input:
+    printer_section:
+      name: Printer
+      icon: mdi:printer-3d
+      input:
+        printer:
+          name: Printer
+          selector:
+            device:
+              filter:
+                - integration: bambu_lab
+        short_name:
+          name: Short name (optional)
+          description: >
+            Used in notification tags and snapshot file names, e.g. `x1c`. Defaults to the
+            device name, which for Bambu printers is usually model + serial.
+          default: ""
+          selector:
+            text: {}
+        dev_mode_sensor:
+          name: Developer LAN mode sensor (optional)
+          description: >
+            `binary_sensor.<printer>_developer_lan_mode`. If set, it only notifies while this is
+            on. Leave it empty to always notify.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: binary_sensor
+    events_section:
+      name: What to notify about
+      icon: mdi:bell-cog
+      input:
+        notify_finished:
+          name: Print finished
+          default: true
+          selector:
+            boolean: {}
+        notify_failed:
+          name: Print failed
+          default: true
+          selector:
+            boolean: {}
+        notify_canceled:
+          name: Print canceled
+          default: false
+          selector:
+            boolean: {}
+        notify_error:
+          name: Print error
+          default: true
+          selector:
+            boolean: {}
+        notify_hms:
+          name: HMS errors
+          default: true
+          selector:
+            boolean: {}
+        ignore_hms_codes:
+          name: HMS codes to ignore
+          description: e.g. `0500-0500-0001-0007` if one keeps nagging you about nothing.
+          default: []
+          selector:
+            text:
+              multiple: true
+    snapshot_section:
+      name: Failure snapshot (optional)
+      icon: mdi:camera
+      collapsed: true
+      input:
+        snapshot_camera:
+          name: Camera
+          description: Leave empty for no snapshots.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: camera
+        snapshot_folder:
+          name: Folder under /config/www
+          default: bambu_snapshots
+          selector:
+            text: {}
+        snapshot_token:
+          name: Secret token
+          description: A long random string. It's what keeps the snapshot URLs unguessable.
+          default: ""
+          selector:
+            text: {}
+    notify_section:
+      name: Notifications
+      icon: mdi:bell
+      input:
+        notify_action:
+          name: Notification action
+          description: >
+            Variables: `notify_title`, `notify_message`, `notify_tag`, `notify_priority`
+            (`normal` or `high`), `notify_event` (`finished`, `failed`, `canceled`, `error`,
+            `hms`), `printer_name`, `printer_slug` and `snapshot_url` (empty when there's no
+            snapshot).
+          default: []
+          selector:
+            action: {}
+
+mode: parallel
+max: 10
+
+variables:
+  printer_id: !input printer
+  dev_mode_entity: !input dev_mode_sensor
+  enabled_events:
+    finished: !input notify_finished
+    failed: !input notify_failed
+    canceled: !input notify_canceled
+    error: !input notify_error
+    hms: !input notify_hms
+  ignore_hms: !input ignore_hms_codes
+  camera_entity: !input snapshot_camera
+  snapshot_folder: !input snapshot_folder
+  snapshot_token: !input snapshot_token
+  printer_name: >-
+    {{ device_attr(printer_id, 'name_by_user') or device_attr(printer_id, 'name')
+       or trigger.event.data.name | default('Printer', true) }}
+  short_name: !input short_name
+  printer_slug: "{{ (short_name or printer_name) | slugify }}"
+  device_ents: "{{ device_entities(printer_id) if printer_id else [] }}"
+
+triggers:
+  - trigger: event
+    event_type: bambu_lab_event
+    event_data:
+      device_id: !input printer
+      type: event_print_finished
+    id: finished
+  - trigger: event
+    event_type: bambu_lab_event
+    event_data:
+      device_id: !input printer
+      type: event_print_failed
+    id: failed
+  - trigger: event
+    event_type: bambu_lab_event
+    event_data:
+      device_id: !input printer
+      type: event_print_canceled
+    id: canceled
+  - trigger: event
+    event_type: bambu_lab_event
+    event_data:
+      device_id: !input printer
+      type: event_print_error
+    id: error
+  - trigger: event
+    event_type: bambu_lab_event
+    event_data:
+      device_id: !input printer
+      type: event_printer_error
+    id: hms
+
+conditions:
+  - alias: This event type is enabled
+    condition: template
+    value_template: "{{ enabled_events[trigger.id] }}"
+  - alias: Developer LAN mode on (or no sensor configured)
+    condition: template
+    value_template: "{{ not dev_mode_entity or is_state(dev_mode_entity, 'on') }}"
+  - alias: HMS code not ignored
+    condition: template
+    value_template: >-
+      {{ trigger.id != 'hms' or (trigger.event.data.code | default('')) not in ignore_hms }}
+
+actions:
+  - alias: Find this printer's sensors through the device
+    variables:
+      ent_task: "{{ device_ents | select('match', 'sensor\\..*_task_name$') | first | default('') }}"
+      ent_gcode: "{{ device_ents | select('match', 'sensor\\..*_gcode_filename$') | first | default('') }}"
+      ent_progress: "{{ device_ents | select('match', 'sensor\\..*_print_progress$') | first | default('') }}"
+      ent_status: "{{ device_ents | select('match', 'sensor\\..*_print_status$') | first | default('') }}"
+      ent_start: "{{ device_ents | select('match', 'sensor\\..*_start_time$') | first | default('') }}"
+      ent_end: "{{ device_ents | select('match', 'sensor\\..*_end_time$') | first | default('') }}"
+      ent_weight: "{{ device_ents | select('match', 'sensor\\..*_print_weight$') | first | default('') }}"
+      ent_print_error: >-
+        {{ device_ents | select('match', 'binary_sensor\\..*_print_error$') | first | default('') }}
+  - variables:
+      print_name: >-
+        {% set t = states(ent_task) if ent_task else 'unknown' %}
+        {%- set g = states(ent_gcode) if ent_gcode else 'unknown' %}
+        {{- t if t not in ['unknown', 'unavailable', 'none', ''] else g }}
+      snapshot_url: ""
+
+  - choose:
+      - alias: Print finished
+        conditions:
+          - condition: trigger
+            id: finished
+        sequence:
+          - variables:
+              duration: >-
+                {% set s = states(ent_start) | as_datetime if ent_start else none %}
+                {%- set e = states(ent_end) | as_datetime if ent_end else none %}
+                {{- (((e - s).total_seconds() / 60) | round(0) | int ~ ' min')
+                    if s and e and e > s else 'unknown' }}
+              weight: >-
+                {% set w = states(ent_weight) if ent_weight else 'unknown' %}
+                {{- w ~ ' g' if w not in ['unknown', 'unavailable', 'none', ''] else 'unknown' }}
+              notify_event: finished
+              notify_priority: normal
+              notify_tag: "bambu_{{ printer_slug }}_print"
+              notify_title: ✅ Print finished
+              notify_message: "Task: {{ print_name }}\nDuration: {{ duration }}\nFilament: {{ weight }}"
+          - choose: []
+            default: !input notify_action
+
+      - alias: Print canceled
+        conditions:
+          - condition: trigger
+            id: canceled
+        sequence:
+          - variables:
+              notify_event: canceled
+              notify_priority: normal
+              notify_tag: "bambu_{{ printer_slug }}_print"
+              notify_title: Print canceled
+              notify_message: >-
+                Task: {{ print_name }}{{ '\nProgress: ' ~ states(ent_progress) ~ '%' if ent_progress else '' }}
+          - choose: []
+            default: !input notify_action
+
+      - alias: Print failed or print error
+        conditions:
+          - condition: trigger
+            id: [failed, error]
+        sequence:
+          - alias: For 'failed', let the print-error flag settle, then stand down if it's set
+            if:
+              - condition: trigger
+                id: failed
+            then:
+              - delay: {seconds: 10}
+              - if:
+                  - condition: template
+                    value_template: "{{ ent_print_error != '' and is_state(ent_print_error, 'on') }}"
+                then:
+                  - stop: The print-error notification already covers this failure
+          - variables:
+              take_snapshot: "{{ camera_entity != '' and snapshot_token != '' }}"
+              snapshot_name: >-
+                failure_{{ printer_slug }}_d{{ now().strftime('%d') }}h{{ now().strftime('%H') }}_{{ snapshot_token }}.jpg
+              snapshot_url: "{{ ('/local/' ~ snapshot_folder ~ '/' ~ snapshot_name) if take_snapshot else '' }}"
+          - if:
+              - condition: template
+                value_template: "{{ take_snapshot }}"
+            then:
+              - action: camera.snapshot
+                target:
+                  entity_id: "{{ camera_entity }}"
+                data:
+                  filename: "/config/www/{{ snapshot_folder }}/{{ snapshot_name }}"
+                continue_on_error: true
+              - delay: {seconds: 2}
+          - variables:
+              failure_type: >-
+                {{ 'Print error ' ~ (trigger.event.data.code | default('')) if trigger.id == 'error'
+                   else 'Print failed' }}
+              details: >-
+                {{ trigger.event.data.error | default('') if trigger.id == 'error'
+                   else 'Print status went to failed without a print error.' }}
+              notify_event: "{{ trigger.id }}"
+              notify_priority: high
+              notify_tag: "bambu_{{ printer_slug }}_print"
+              notify_title: 🚨 Print failure
+              notify_message: >-
+                Type: {{ failure_type }}
+                {{- '\nFile: ' ~ print_name }}
+                {{- '\nProgress: ' ~ states(ent_progress) ~ '%' if ent_progress else '' }}
+                {{- '\nStatus: ' ~ states(ent_status) if ent_status else '' }}
+                {{- '\nDetails: ' ~ details if details else '' }}
+                {{- '\nSnapshot: ' ~ snapshot_url if snapshot_url else '' }}
+          - choose: []
+            default: !input notify_action
+
+      - alias: HMS error
+        conditions:
+          - condition: trigger
+            id: hms
+        sequence:
+          - variables:
+              notify_event: hms
+              notify_priority: high
+              notify_tag: "bambu_{{ printer_slug }}_hms_{{ trigger.event.data.code | default('unknown') }}"
+              notify_title: HMS error
+              notify_message: >-
+                {{ trigger.event.data.code | default('?') }}: {{ trigger.event.data.error | default('') }}
+                {{- '\n' ~ trigger.event.data.url if trigger.event.data.url | default('') else '' }}
+          - choose: []
+            default: !input notify_action

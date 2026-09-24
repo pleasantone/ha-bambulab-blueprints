@@ -36,7 +36,7 @@ blueprint:
   domain: automation
   source_url: https://github.com/pleasantone/ha-bambulab-blueprints/blob/main/blueprints/automation/pleasantone/bambu_filter_wear.yaml
   homeassistant:
-    min_version: 2025.1.0
+    min_version: 2025.4.0
   input:
     printer_section:
       name: Printer
