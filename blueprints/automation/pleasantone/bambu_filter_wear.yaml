@@ -1,0 +1,306 @@
+blueprint:
+  name: Bambu Lab - Filter wear tracker
+  author: pleasantone
+  description: >
+    Tracks how worn a printer's carbon filter is, in **weighted hours**, and tells you
+    when it's time to swap it. You don't have to wait until the room starts to stink.
+
+
+    While air is moving through the filter, every 5 minutes adds 5 minutes times a
+    material weight: ABS/ASA/PA/PC count extra, PLA counts less. When the printer isn't
+    printing, the carbon still soaks up moisture, so it adds a small amount scaled by room
+    humidity.
+
+
+    One instance per filter. A printer with two filters (e.g. the H2C's stock filter plus an
+    add-on carbon filter) gets two instances, so you can replace them on different schedules.
+
+
+    **Before you start**, create three helpers for each filter (Settings → Devices & services →
+    Helpers):
+
+    - a **Number** for the wear counter: min 0, max 100000, step 0.001, box mode, unit `h`.
+    Don't set an initial value, or it resets on every restart.
+
+    - a **Number** for the rated life: min 10, max 5000, step 10, unit `h`. Set it to
+    whatever you think the filter is good for.
+
+    - a **Button** you press after replacing the filter. Its state is the last replacement date.
+
+
+    The weights are educated guesses, not lab data. Tune them, and if you calibrate them
+    against real replacements I'd love to hear the numbers.
+
+
+    Counters are plain `input_number`s, so this doesn't create any long-term statistics.
+  domain: automation
+  source_url: https://github.com/pleasantone/ha-bambulab-blueprints/blob/main/blueprints/automation/pleasantone/bambu_filter_wear.yaml
+  homeassistant:
+    min_version: 2025.1.0
+  input:
+    printer_section:
+      name: Printer
+      icon: mdi:printer-3d
+      input:
+        print_status:
+          name: Print status
+          description: The printer's print status sensor (`sensor.<printer>_print_status`).
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+        active_tray:
+          name: Active tray
+          description: >
+            The printer's active tray sensor (`sensor.<printer>_active_tray`). Its `type`
+            attribute is the material (PLA, ABS, PETG-CF...).
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+        filter_fan:
+          name: Filter fan (optional)
+          description: >
+            If the filter has its own fan, e.g. a Bento Box that only runs for some
+            materials, pick it here and wear counts only while that fan is on. Leave it empty
+            and wear counts while the printer is in prepare, running or pause.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain:
+                    - fan
+                    - switch
+        room_humidity:
+          name: Room humidity (optional)
+          description: >
+            Humidity sensor near the printer. Drives the idle wear. Leave it empty to count
+            only while filtering.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+                  device_class: humidity
+    helpers_section:
+      name: Helpers
+      icon: mdi:air-filter
+      input:
+        filter_name:
+          name: Filter name
+          description: Used in notifications, e.g. "Bento Box carbon" or "H2C stock filter".
+          default: Carbon filter
+          selector:
+            text: {}
+        wear_helper:
+          name: Wear counter
+          description: The input_number that holds the weighted hours.
+          selector:
+            entity:
+              filter:
+                - domain: input_number
+        rated_life_helper:
+          name: Rated life
+          description: The input_number with the filter's rated life, in weighted hours.
+          selector:
+            entity:
+              filter:
+                - domain: input_number
+        replaced_button:
+          name: Replaced button
+          description: The input_button you press after swapping the filter. Resets the counter to 0.
+          selector:
+            entity:
+              filter:
+                - domain: input_button
+    weights_section:
+      name: Material weights
+      icon: mdi:scale-balance
+      collapsed: true
+      input:
+        high_voc_materials:
+          name: High-VOC materials
+          description: Material type prefixes that wear the filter fastest.
+          default: [ABS, ASA, PC, PA, PPA, PPS, HIPS]
+          selector:
+            text:
+              multiple: true
+        medium_voc_materials:
+          name: Medium materials
+          description: >
+            Checked before the high-VOC list, so PCTG lands here and not under PC.
+          default: [PETG, PCTG, PET, TPU, TPE, PVA, BVOH]
+          selector:
+            text:
+              multiple: true
+        low_voc_materials:
+          name: Low-VOC materials
+          default: [PLA]
+          selector:
+            text:
+              multiple: true
+        weight_high:
+          name: High-VOC weight
+          default: 3
+          selector:
+            number: {min: 0, max: 10, step: 0.1, mode: box}
+        weight_medium:
+          name: Medium weight
+          default: 1
+          selector:
+            number: {min: 0, max: 10, step: 0.1, mode: box}
+        weight_low:
+          name: Low-VOC weight
+          default: 0.5
+          selector:
+            number: {min: 0, max: 10, step: 0.1, mode: box}
+        weight_unknown:
+          name: Unknown material weight
+          description: Used for anything not in the lists above, including an empty tray.
+          default: 1
+          selector:
+            number: {min: 0, max: 10, step: 0.1, mode: box}
+        idle_rate:
+          name: Idle rate
+          description: >
+            Weighted hours per idle hour at 100% relative humidity. At the default 0.05, a filter
+            sitting in 60% RH ages about 0.7 h a day.
+          default: 0.05
+          selector:
+            number: {min: 0, max: 1, step: 0.005, mode: box}
+    notify_section:
+      name: Notifications
+      icon: mdi:bell
+      input:
+        notify_action:
+          name: Notification action
+          description: >
+            What to run when the filter passes its rated life, and for the daily reminder.
+            These variables are available: `notify_title`, `notify_message`, `notify_tag`
+            (unique per filter, so the reminder replaces yesterday's instead of stacking),
+            `notify_event` (`worn` or `remind`), `filter_name`, `wear` and `rated`.
+            Example: a `notify.mobile_app_<phone>` action with `title: "{{ notify_title }}"`,
+            `message: "{{ notify_message }}"` and `data: {tag: "{{ notify_tag }}"}`.
+          default: []
+          selector:
+            action: {}
+        reminder_enabled:
+          name: Daily reminder
+          description: Re-notify every day while the filter is past its rated life.
+          default: true
+          selector:
+            boolean: {}
+        reminder_time:
+          name: Reminder time
+          default: "09:00:00"
+          selector:
+            time: {}
+
+mode: queued
+max: 10
+
+variables:
+  wear_entity: !input wear_helper
+  rated_entity: !input rated_life_helper
+  button_entity: !input replaced_button
+  status_entity: !input print_status
+  tray_entity: !input active_tray
+  fan_entity: !input filter_fan
+  humidity_entity: !input room_humidity
+  filter_name: !input filter_name
+  high_voc: !input high_voc_materials
+  medium_voc: !input medium_voc_materials
+  low_voc: !input low_voc_materials
+  w_high: !input weight_high
+  w_medium: !input weight_medium
+  w_low: !input weight_low
+  w_unknown: !input weight_unknown
+  idle_rate: !input idle_rate
+  tick_minutes: 5
+
+triggers:
+  - trigger: time_pattern
+    minutes: /5
+    id: tick
+  # A new button sits in `unknown` until its first press, so only `unavailable` is excluded as
+  # a from-state. A restart restores the button before automations attach, so it can't reset.
+  - trigger: state
+    entity_id: !input replaced_button
+    not_from: [unavailable]
+    not_to: [unavailable, unknown]
+    id: reset
+  - trigger: numeric_state
+    entity_id: !input wear_helper
+    above: !input rated_life_helper
+    id: worn
+  - trigger: time
+    at: !input reminder_time
+    enabled: !input reminder_enabled
+    id: remind
+
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: tick
+        sequence:
+          - variables:
+              filtering: >-
+                {% if fan_entity %}{{ is_state(fan_entity, 'on') }}
+                {%- else %}{{ states(status_entity) in ['prepare', 'running', 'pause'] }}{% endif %}
+              material: "{{ (state_attr(tray_entity, 'type') or '') | string | upper }}"
+              humidity: "{{ (states(humidity_entity) | float(0)) if humidity_entity else 0 }}"
+              weight: >-
+                {% if filtering %}
+                  {%- set ns = namespace(w=w_unknown, hit=false) %}
+                  {%- for group in [[medium_voc, w_medium], [high_voc, w_high], [low_voc, w_low]] %}
+                    {%- for prefix in group[0] %}
+                      {%- if not ns.hit and prefix and material.startswith(prefix | upper) %}
+                        {%- set ns.w = group[1] %}{% set ns.hit = true %}
+                      {%- endif %}
+                    {%- endfor %}
+                  {%- endfor %}{{ ns.w }}
+                {%- else %}{{ idle_rate * humidity / 100 }}{% endif %}
+              increment: "{{ (weight | float(0)) * tick_minutes / 60 }}"
+          - action: input_number.set_value
+            target:
+              entity_id: !input wear_helper
+            data:
+              value: "{{ ((states(wear_entity) | float(0)) + increment) | round(4) }}"
+
+      - conditions:
+          - condition: trigger
+            id: reset
+        sequence:
+          - action: input_number.set_value
+            target:
+              entity_id: !input wear_helper
+            data:
+              value: 0
+
+      - conditions:
+          - condition: trigger
+            id: [worn, remind]
+          - condition: numeric_state
+            entity_id: !input wear_helper
+            above: !input rated_life_helper
+        sequence:
+          - variables:
+              notify_event: "{{ trigger.id }}"
+              wear: "{{ states(wear_entity) | float(0) }}"
+              rated: "{{ states(rated_entity) | float(0) }}"
+              button_name: "{{ state_attr(button_entity, 'friendly_name') or button_entity }}"
+              notify_tag: "filter_{{ wear_entity.split('.')[1] }}"
+              notify_title: >-
+                {{ 'Filter due for replacement' if notify_event == 'worn'
+                   else 'Filter still due for replacement' }}
+              notify_message: >-
+                {%- if notify_event == 'worn' -%}
+                {{ filter_name }} has reached {{ wear | round(0) | int }} weighted hours
+                (rated {{ rated | round(0) | int }}).
+                {%- else -%}
+                {{ filter_name }} is at {{ wear | round(0) | int }} weighted hours,
+                {{ (wear - rated) | round(0) | int }} past its rated {{ rated | round(0) | int }}.
+                {%- endif %} Replace it, then press '{{ button_name }}'.
+          - choose: []
+            default: !input notify_action
