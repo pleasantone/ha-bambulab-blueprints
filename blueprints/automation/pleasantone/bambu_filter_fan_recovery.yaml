@@ -1,5 +1,5 @@
 blueprint:
-  name: Bambu Lab - Keep a filter fan on through dropouts
+  name: Bambu Lab - Filter fan dropout recovery
   author: pleasantone
   description: >
     Puts a filter fan (Bento Box, exhaust, anything on a smart plug) back on if it drops off

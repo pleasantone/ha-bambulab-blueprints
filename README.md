@@ -137,7 +137,7 @@ device and it finds the task/time/weight sensors itself. What's different from t
   `/config/www` are served **without a login**, so it puts a random token in the file name. It
   also reuses day+hour slots, so the folder can't grow forever.
 
-### Keep a filter fan on through dropouts
+### Filter fan dropout recovery
 
 [![Open your Home Assistant instance and show the blueprint import dialog with a specific blueprint pre-filled.](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Fpleasantone%2Fha-bambulab-blueprints%2Fblob%2Fmain%2Fblueprints%2Fautomation%2Fpleasantone%2Fbambu_filter_fan_recovery.yaml)
 
