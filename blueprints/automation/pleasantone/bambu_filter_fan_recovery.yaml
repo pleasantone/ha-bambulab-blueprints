@@ -1,0 +1,77 @@
+blueprint:
+  name: Bambu Lab - Keep a filter fan on through dropouts
+  author: pleasantone
+  description: >
+    Puts a filter fan (Bento Box, exhaust, anything on a smart plug) back on if it drops off
+    the network mid-print and comes back **off**.
+
+
+    Wi-Fi plugs and ESPHome fans often come back from `unavailable` as `off`. Automations like
+    the popular Bentobox blueprint only turn the fan on when the tray or print status changes,
+    so one blip during an ABS print can leave the rest of the print unfiltered.
+
+
+    This only restores the fan if it was **on** when it dropped out, and only if the printer is
+    still printing when it comes back. It never decides on its own that the fan should run;
+    that stays with whatever turned it on in the first place.
+  domain: automation
+  source_url: https://github.com/pleasantone/ha-bambulab-blueprints/blob/main/blueprints/automation/pleasantone/bambu_filter_fan_recovery.yaml
+  homeassistant:
+    min_version: 2025.4.0
+  input:
+    filter_fan:
+      name: Filter fan
+      selector:
+        entity:
+          filter:
+            - domain:
+                - fan
+                - switch
+    print_status:
+      name: Print status
+      description: The printer's print status sensor (`sensor.<printer>_print_status`).
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+    give_up_after:
+      name: Give up if it stays unavailable longer than
+      default: {hours: 1, minutes: 0, seconds: 0}
+      selector:
+        duration: {}
+
+mode: single
+max_exceeded: silent
+
+variables:
+  fan_entity: !input filter_fan
+  status_entity: !input print_status
+
+triggers:
+  - trigger: state
+    entity_id: !input filter_fan
+    from: "on"
+    to: unavailable
+
+actions:
+  - alias: Wait for it to come back
+    wait_for_trigger:
+      - trigger: state
+        entity_id: !input filter_fan
+        from: unavailable
+        to: ["on", "off"]
+    timeout: !input give_up_after
+    continue_on_timeout: false
+  - alias: Came back off, while still printing
+    condition: template
+    value_template: >-
+      {{ is_state(fan_entity, 'off')
+         and states(status_entity) in ['prepare', 'running', 'pause'] }}
+  - action: homeassistant.turn_on
+    target:
+      entity_id: !input filter_fan
+  - action: logbook.log
+    data:
+      name: Filter fan recovery
+      message: "Came back off after a dropout mid-print; turned it back on"
+      entity_id: "{{ fan_entity }}"
