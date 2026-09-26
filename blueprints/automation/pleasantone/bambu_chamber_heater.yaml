@@ -23,8 +23,9 @@ blueprint:
 
     - the bed target drops below the "off" threshold (a manual preheat you turned off)
 
-    - the heater has been on for a while with the printer idle/finished/failed (a manual preheat
-    you forgot about)
+    - the heater has been on for 75 minutes (default) with the printer idle/finished/failed.
+    That leaves room to heat-soak the chamber before starting a print, and still catches a
+    manual preheat you forgot about
 
     - the printer has been **offline or unavailable for an hour**. A printer that drops off
     the network mid-print keeps printing, so a shorter window would cool the chamber under a
@@ -98,7 +99,10 @@ blueprint:
             duration: {}
         idle_backstop:
           name: Off if on this long with the printer idle
-          default: {hours: 0, minutes: 10, seconds: 0}
+          description: >-
+            Counts from when the heater turns on. Set it longer than your usual pre-print heat
+            soak, or the heater will switch off before you start the print.
+          default: {hours: 1, minutes: 15, seconds: 0}
           selector:
             duration: {}
         offline_grace:

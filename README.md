@@ -100,6 +100,10 @@ bed target goes above ~90 °C, and makes sure it's off whenever the printer isn'
 printing. That includes the easy-to-miss cases: a cancel during prepare, a cancel while paused,
 a manual bed preheat you forgot about.
 
+"Forgot about" means on for 75 minutes with the printer idle. I heat-soak the chamber for up to
+an hour before an ASA print, and a 10-minute cutoff cut the soak short. Adjust it to your own
+soak time.
+
 A printer that drops off the network mid-print keeps printing, so offline/unavailable only turns
 the heater off after an hour. It never counts as "not printing" for the other exits.
 
