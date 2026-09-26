@@ -141,15 +141,17 @@ device and it finds the task/time/weight sensors itself. What's different from t
   `/config/www` are served **without a login**, so it puts a random token in the file name. It
   also reuses day+hour slots, so the folder can't grow forever.
 
-### Filter fan dropout recovery
+### Dropout recovery (fan, heater, anything on a plug)
 
 [![Open your Home Assistant instance and show the blueprint import dialog with a specific blueprint pre-filled.](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Fpleasantone%2Fha-bambulab-blueprints%2Fblob%2Fmain%2Fblueprints%2Fautomation%2Fpleasantone%2Fbambu_filter_fan_recovery.yaml)
 
-My Bento Box fan comes back from a Wi-Fi dropout as `off`, and the Bentobox blueprint I use
-only turns it on when the tray or print status changes. So one blip during an ABS print leaves
-the rest of the print unfiltered. This puts the fan back on, but only if it was on when it
+My Bento Box fan and my chamber heater share a Wi-Fi relay. When it drops off the network, both
+come back `off`, and the automations that run them only switch them on at the start of a print.
+One blip during an ABS print left the rest of it unfiltered, and a power cycle during an ASA
+print left the chamber unheated. This puts the device back on, but only if it was on when it
 dropped out and the printer is still printing when it comes back. It never decides by itself
-that the fan should run.
+that the device should run, and it never turns anything off. I run one copy for the fan and one
+for the heater.
 
 ## Notifications, in general
 

@@ -1,26 +1,29 @@
 blueprint:
-  name: Bambu Lab - Filter fan dropout recovery
+  name: Bambu Lab - Dropout recovery (fan, heater, anything on a plug)
   author: pleasantone
   description: >
-    Puts a filter fan (Bento Box, exhaust, anything on a smart plug) back on if it drops off
-    the network mid-print and comes back **off**.
+    Puts a printer accessory back on if it drops off the network mid-print and comes back
+    **off**: a filter fan like a Bento Box, a chamber heater, an exhaust, anything on a smart
+    plug or relay.
 
 
-    Wi-Fi plugs and ESPHome fans often come back from `unavailable` as `off`. Automations like
-    the popular Bentobox blueprint only turn the fan on when the tray or print status changes,
-    so one blip during an ABS print can leave the rest of the print unfiltered.
+    Wi-Fi plugs, relays and ESPHome devices often come back from `unavailable` as `off`. The
+    automations that switch these on usually do it once, when the print starts or the tray
+    changes, so one blip mid-print can leave the rest of an ABS print unfiltered or unheated.
 
 
-    This only restores the fan if it was **on** when it dropped out, and only if the printer is
-    still printing when it comes back. It never decides on its own that the fan should run;
-    that stays with whatever turned it on in the first place.
+    This only restores the device if it was **on** when it dropped out, and only if the printer
+    is still printing when it comes back. It never decides on its own that the device should
+    run; that stays with whatever turned it on in the first place, and so does turning it off.
+    Use one automation per device.
   domain: automation
   source_url: https://github.com/pleasantone/ha-bambulab-blueprints/blob/main/blueprints/automation/pleasantone/bambu_filter_fan_recovery.yaml
   homeassistant:
     min_version: 2025.4.0
   input:
     filter_fan:
-      name: Filter fan
+      name: Device to restore
+      description: The fan or switch to put back on. (The input is still called `filter_fan` so existing automations keep working.)
       selector:
         entity:
           filter:
@@ -72,6 +75,6 @@ actions:
       entity_id: !input filter_fan
   - action: logbook.log
     data:
-      name: Filter fan recovery
+      name: Dropout recovery
       message: "Came back off after a dropout mid-print; turned it back on"
       entity_id: "{{ fan_entity }}"
