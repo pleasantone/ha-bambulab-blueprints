@@ -153,6 +153,50 @@ dropped out and the printer is still printing when it comes back. It never decid
 that the device should run, and it never turns anything off. I run one copy for the fan and one
 for the heater.
 
+### Low filament warning
+
+[![Open your Home Assistant instance and show the blueprint import dialog with a specific blueprint pre-filled.](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Fpleasantone%2Fha-bambulab-blueprints%2Fblob%2Fmain%2Fblueprints%2Fautomation%2Fpleasantone%2Fbambu_low_filament.yaml)
+
+Tells you a spool won't make it while there's still time to do something about it, instead
+of finding the printer paused at runout. It only warns about spools the current print is
+actually using.
+
+- **At print start**, once a spool has been feeding for 30 seconds (my printers take 3–4
+  minutes to get there), it compares what the rest of the print needs from each spool with
+  what's left on it (remaining % × spool weight). Short: "Not enough filament". Within the
+  safety margin (10% of the spool by default, so ~100 g on a 1 kg spool): "Filament will be
+  tight". Plenty: nothing, even if the spool is under 10%. A reconnect after a Wi-Fi drop
+  doesn't count as a new start.
+- **During the print**, it warns when a used spool drops below 10% and stays there for 5
+  minutes.
+- **After a Home Assistant restart** mid-print, it checks again for low spools, in case the
+  drop happened while HA was down.
+
+How it decides what the print uses:
+
+- The per-slot grams on the printer's `print_weight` sensor, which the integration reads from
+  the print file. The integration doesn't clear the previous print's numbers, so the list is
+  only trusted if it was updated after this print started.
+- My H2C never fills that list in; my X1C does. With no usable list it falls back to the
+  spool that's feeding and charges it the whole print's weight. The wording changes to
+  "may run out" / "may be tight", because on a multi-color print that's an overestimate.
+- It watches each AMS slot, not the active tray. In a multi-color print the active tray
+  switches every few layers, so a "below 10% for 5 minutes" check on it keeps resetting, and
+  a color used in short bursts would never alert.
+
+Give it an `input_text` helper (max length 255) and it remembers which warnings it has sent,
+so each one goes out once per print. Without it, a spool bobbing around 10% can warn more
+than once. One notification tag per slot.
+
+**It only works for Bambu spools with an RFID tag.** Third-party spools report `-1` for what's
+left, so they can never trigger it. The estimate on Bambu spools is rough too: I've seen it
+swing 60–72% during one print and jump back to 100% after a power cycle before settling
+again. That's what the hold time and margin are for.
+
+It finds the printer's progress, time-left and start-time sensors through the print status
+sensor's device, by their default entity ID endings. If you've renamed those, the messages
+lose the time left and the print's usage list is never trusted.
+
 ## Notifications, in general
 
 Every blueprint here takes a **notification action** instead of a notify service, and hands it

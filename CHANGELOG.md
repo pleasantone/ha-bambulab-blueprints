@@ -12,5 +12,6 @@
   working.
 - Chamber heater control: the idle cutoff now defaults to 75 minutes, to leave room for a
   pre-print heat soak.
+- Low filament warning: first version.
 - Minimum Home Assistant version is 2025.4.
 - README and PATTERNS.md.

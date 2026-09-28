@@ -1,0 +1,341 @@
+blueprint:
+  name: Bambu Lab - Low filament warning
+  author: pleasantone
+  description: >
+    Warns you when a spool won't make it through the print, while there's still time to do
+    something about it, instead of finding the printer paused at runout.
+
+
+    It warns:
+
+    - **At print start** (not a resume, not a reconnect): once a spool has been feeding for 30
+    seconds, it compares what the rest of the print needs from each spool it uses with what's
+    left on it (remaining % × spool weight). "Not enough filament" if it's short, "Filament
+    will be tight" if it's within the safety margin, nothing if there's plenty.
+
+    - **During the print**: when a spool the print uses drops below the threshold and stays
+    there for the hold time. Once per spool per print if you give it the optional helper.
+
+    - **After a Home Assistant restart** mid-print: it re-checks for low spools, because the
+    drop may have happened while HA was down.
+
+
+    "Uses" comes from the per-slot grams on the printer's `print_weight` sensor, which the
+    integration reads from the print file. It only trusts that list if it was updated after
+    this print started, because the integration doesn't clear the previous print's. When
+    there's no usable list, it falls back to the spool that's feeding, charges it the whole
+    print's weight, and says so: "may run out", not "will run out".
+
+
+    It watches each AMS slot rather than the active tray. In a multi-color print the active
+    tray switches every few layers, which would keep resetting the hold timer.
+
+
+    **Only Bambu spools with an RFID tag report how much is left.** Third-party spools report
+    `-1` and can never trigger this. The estimate is also rough: I've seen it swing 60-72%
+    during one print, reset to 100% after a power cycle, and read 0 for a few seconds after
+    the printer reconnects. That's why 0 is ignored and the hold time and margin exist.
+
+
+    It finds the printer's progress, remaining-time and start-time sensors through the print
+    status sensor's device, by their default entity ID endings (`_print_progress`,
+    `_remaining_time`, `_start_time`). If you've renamed those, the messages lose the time left
+    and the stale-list check can't run, so the per-slot list is never trusted.
+  domain: automation
+  source_url: https://github.com/pleasantone/ha-bambulab-blueprints/blob/main/blueprints/automation/pleasantone/bambu_low_filament.yaml
+  homeassistant:
+    min_version: 2025.4.0
+  input:
+    printer_section:
+      name: Printer
+      icon: mdi:printer-3d
+      input:
+        print_status:
+          name: Print status
+          description: The printer's print status sensor (`sensor.<printer>_print_status`).
+          selector:
+            entity:
+              filter:
+                - integration: bambu_lab
+                  domain: sensor
+        print_weight:
+          name: Print weight
+          description: >
+            The printer's print weight sensor (`sensor.<printer>_print_weight`). Its attributes
+            list the grams each AMS slot is used for in the current print.
+          selector:
+            entity:
+              filter:
+                - integration: bambu_lab
+                  domain: sensor
+        tray_sensors:
+          name: AMS slot sensors
+          description: >
+            Every AMS tray sensor on this printer (`sensor.<printer>_ams_<n>_tray_<m>`),
+            AMS HT included. Leave out the external spools: they never report what's left.
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - integration: bambu_lab
+                  domain: sensor
+    threshold_section:
+      name: Thresholds
+      icon: mdi:gauge-low
+      input:
+        threshold:
+          name: Warn below
+          description: During a print, warn when a spool it uses is below this percentage.
+          default: 10
+          selector:
+            number: {min: 2, max: 50, step: 1, unit_of_measurement: "%", mode: box}
+        hold_time:
+          name: Hold time
+          description: >
+            How long a slot has to stay below the threshold before it counts. The estimate is
+            noisy, so a short dip shouldn't alert.
+          default: {hours: 0, minutes: 5, seconds: 0}
+          selector:
+            duration: {}
+        margin:
+          name: Safety margin
+          description: >
+            At print start, warn that it will be tight unless a spool has this much more than
+            the print needs, as a percentage of the spool's full weight. The estimate wanders by
+            10% or more, so less than that isn't a real margin.
+          default: 10
+          selector:
+            number: {min: 0, max: 50, step: 1, unit_of_measurement: "%", mode: box}
+        feed_timeout:
+          name: Wait for feeding
+          description: >
+            At print start, how long to wait for a spool to start feeding before checking
+            anyway. Printers usually start feeding 3-4 minutes after the print starts.
+          default: {hours: 0, minutes: 15, seconds: 0}
+          selector:
+            duration: {}
+    notify_section:
+      name: Notifications
+      icon: mdi:bell
+      input:
+        warned_store:
+          name: Once-per-print helper (optional)
+          description: >
+            An `input_text` helper (max length 255) the blueprint uses to remember which spools
+            it has already warned about in this print, so a noisy estimate bobbing around the
+            threshold, or a restart, doesn't warn again. Without it, a spool can warn more than
+            once per print.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: input_text
+        notify_action:
+          name: Notification action
+          description: >
+            Runs once per spool that needs a warning. These variables are available:
+            `notify_title`, `notify_message`, `notify_tag` (one per slot, so a newer warning
+            for the same slot replaces the older one), `notify_event` (`short`, `tight` or
+            `low`), `notify_estimated` (true when the per-slot list wasn't usable and the whole
+            print's weight was charged to the feeding spool), `notify_spool` (spool name),
+            `notify_slot` (e.g. `AMS 1 Tray 3`, `AMS HT 1`), `notify_remain` (percent),
+            `notify_needed` (grams the rest of the print needs from it, 0 if unknown) and
+            `notify_available` (estimated grams left on it, 0 if unknown).
+          default: []
+          selector:
+            action: {}
+
+mode: parallel
+max: 10
+
+variables:
+  status_entity: !input print_status
+  weight_entity: !input print_weight
+  trays: !input tray_sensors
+  threshold: !input threshold
+  margin: !input margin
+  store_entity: !input warned_store
+  printer_sensors: "{{ device_entities(device_id(status_entity)) | select('match', 'sensor[.]') | list }}"
+  progress_entity: "{{ printer_sensors | select('search', '_print_progress$') | first | default('', true) }}"
+  remaining_entity: "{{ printer_sensors | select('search', '_remaining_time$') | first | default('', true) }}"
+  start_entity: "{{ printer_sensors | select('search', '_start_time$') | first | default('', true) }}"
+
+triggers:
+  - id: dropped
+    trigger: numeric_state
+    entity_id: !input tray_sensors
+    attribute: remain
+    above: 0
+    below: !input threshold
+    for: !input hold_time
+  - id: started
+    trigger: state
+    entity_id: !input print_status
+    to: running
+    not_from: [pause, offline, unavailable, unknown]
+  - id: restart
+    trigger: homeassistant
+    event: start
+
+conditions:
+  - alias: A drop must be real, not a reconnect or a recovery from unavailable
+    condition: template
+    value_template: >-
+      {{ trigger.id != 'dropped'
+         or (trigger.from_state is not none
+             and trigger.from_state.state not in ['unavailable', 'unknown']
+             and (trigger.from_state.attributes.remain | int(-1)) > 0) }}
+  - alias: A print is running or paused (after a restart, checked once the printer is back)
+    condition: template
+    value_template: "{{ trigger.id == 'restart' or states(status_entity) in ['running', 'pause'] }}"
+
+actions:
+  - alias: "Start: wait for a spool to start feeding (a 1 s blip doesn't count)"
+    if:
+      - condition: trigger
+        id: started
+    then:
+      - wait_for_trigger:
+          - trigger: state
+            entity_id: !input tray_sensors
+            attribute: active
+            to: true
+            for: {seconds: 30}
+        timeout: !input feed_timeout
+        continue_on_timeout: true
+      - condition: template
+        value_template: "{{ states(status_entity) in ['running', 'pause'] }}"
+  - alias: "Restart: give the printer time to reconnect and report its trays"
+    if:
+      - condition: trigger
+        id: restart
+    then:
+      - delay: {minutes: 5}
+      - condition: template
+        value_template: "{{ states(status_entity) in ['running', 'pause'] }}"
+  - alias: Work out which spools this print uses and which need a warning
+    variables:
+      print_id: >-
+        {%- set s = states(start_entity) if start_entity else '' -%}
+        {{ s if as_datetime(s, none) is not none else (states[status_entity].last_changed | string) }}
+      alerts: >-
+        {%- set ws = states[weight_entity] -%}
+        {%- set w = ws.attributes if ws else {} -%}
+        {%- set used = w.keys() | map('string') | select('match', '^AMS ') | list -%}
+        {%- set started_at = as_datetime(states(start_entity), none) if start_entity else none -%}
+        {%- set fresh = ws is not none and started_at is not none
+                        and ws.last_updated >= started_at - timedelta(minutes=1) -%}
+        {%- set by_slot = fresh and used | count > 0 -%}
+        {%- set total = states(weight_entity) | float(0) if fresh else 0 -%}
+        {%- set progress = states(progress_entity) | float(0) if progress_entity else 0 -%}
+        {%- set left = (1 - progress / 100) if 0 <= progress < 100 else 1 -%}
+        {%- set ns = namespace(out=[]) -%}
+        {%- for e in ([trigger.entity_id] if trigger.id == 'dropped' else trays) -%}
+          {%- set m = (device_attr(device_id(e), 'name') or '') | regex_findall('_AMS_([0-9]+)$') -%}
+          {%- set slot = state_attr(e, 'slot') | int(0) -%}
+          {%- if m and slot > 0 and state_attr(e, 'remain_enabled') != false -%}
+            {%- set n = m[0] | int -%}
+            {%- set key = ('AMS HT ' ~ (n - 127)) if n >= 128 else ('AMS ' ~ n ~ ' Tray ' ~ slot) -%}
+            {%- set r = state_attr(e, 'remain') | int(-1) -%}
+            {%- set was_feeding = trigger.id == 'dropped' and trigger.to_state.attributes.active == true -%}
+            {%- set in_print = (key in used) if by_slot
+                               else (was_feeding or state_attr(e, 'active') == true) -%}
+            {%- set need_total = (w.get(key, 0) | float(0)) if by_slot else total -%}
+            {%- set need = (need_total * left) | round(0) -%}
+            {%- set spool_g = state_attr(e, 'tray_weight') | float(0) -%}
+            {%- set avail = (r / 100 * spool_g) | round(0) if r > 0 and spool_g > 0 else 0 -%}
+            {%- set event = namespace(v='') -%}
+            {%- if in_print and r > 0 -%}
+              {%- if trigger.id == 'started' and need > 0 and avail > 0 -%}
+                {%- if avail < need -%}{%- set event.v = 'short' -%}
+                {%- elif avail < need + margin / 100 * spool_g -%}{%- set event.v = 'tight' -%}
+                {%- endif -%}
+              {%- elif r < threshold -%}{%- set event.v = 'low' -%}
+              {%- endif -%}
+            {%- endif -%}
+            {%- if event.v -%}
+              {%- set ns.out = ns.out + [{'event': event.v, 'entity': e, 'key': key,
+                                         'name': states(e), 'remain': r,
+                                         'needed': need if (by_slot or event.v != 'low') else 0,
+                                         'available': avail, 'estimated': not by_slot}] -%}
+            {%- endif -%}
+          {%- endif -%}
+        {%- endfor -%}
+        {{ ns.out }}
+      already: >-
+        {%- set s = states(store_entity) if store_entity else '' -%}
+        {{ s.split('|', 1)[1].split(';') if s.startswith(print_id ~ '|') else [] }}
+      to_send: >-
+        {%- set ns = namespace(out=[]) -%}
+        {%- for a in alerts if (a.key ~ ':' ~ a.event) not in already -%}
+        {%- set ns.out = ns.out + [a] -%}
+        {%- endfor -%}
+        {{ ns.out }}
+  - alias: Stop unless a spool needs a warning
+    condition: template
+    value_template: "{{ to_send | count > 0 }}"
+  - repeat:
+      for_each: "{{ to_send }}"
+      sequence:
+        - variables:
+            notify_event: "{{ repeat.item.event }}"
+            notify_estimated: "{{ repeat.item.estimated }}"
+            notify_spool: "{{ repeat.item.name }}"
+            notify_slot: "{{ repeat.item.key }}"
+            notify_remain: "{{ repeat.item.remain }}"
+            notify_needed: "{{ repeat.item.needed }}"
+            notify_available: "{{ repeat.item.available }}"
+            notify_tag: "filament_{{ repeat.item.entity.split('.')[1] }}"
+            notify_title: >-
+              {%- set i = repeat.item -%}
+              {%- if i.event == 'short' -%}{{ 'Filament may run out' if i.estimated else 'Not enough filament' }}
+              {%- elif i.event == 'tight' -%}{{ 'Filament may be tight' if i.estimated else 'Filament will be tight' }}
+              {%- else -%}Filament running low{%- endif -%}
+            notify_message: >-
+              {%- set i = repeat.item -%}
+              {%- set hrs = namespace(v=none) -%}
+              {%- if remaining_entity and is_number(states(remaining_entity)) -%}
+              {%- set u = state_attr(remaining_entity, 'unit_of_measurement') -%}
+              {%- set t = states(remaining_entity) | float -%}
+              {%- set hrs.v = t / 60 if u == 'min' else (t / 3600 if u == 's' else (t * 24 if u == 'd' else t)) -%}
+              {%- endif -%}
+              {%- if i.event == 'short' and not i.estimated -%}
+              {{ i.name }} ({{ i.key }}) probably won't last this print. It needs about
+              {{ i.needed | int }} g more and the spool has about {{ i.available | int }} g left
+              ({{ i.remain }}%). Load a fuller spool now, or be ready for the runout pause.
+              {%- elif i.event == 'short' -%}
+              {{ i.name }} ({{ i.key }}) may not last this print. The whole print needs about
+              {{ i.needed | int }} g more and this spool has about {{ i.available | int }} g left
+              ({{ i.remain }}%). If it's the only filament in the print, it will run out.
+              {%- elif i.event == 'tight' and not i.estimated -%}
+              {{ i.name }} ({{ i.key }}) is cutting it close. This print needs about
+              {{ i.needed | int }} g more and the spool has about {{ i.available | int }} g left
+              ({{ i.remain }}%). The estimate can be off by 10% or more, so have the next spool
+              ready.
+              {%- elif i.event == 'tight' -%}
+              {{ i.name }} ({{ i.key }}) may be cutting it close. The whole print needs about
+              {{ i.needed | int }} g more and this spool has about {{ i.available | int }} g left
+              ({{ i.remain }}%). If it's the only filament in the print, have the next spool
+              ready.
+              {%- else -%}
+              {{ i.name }} ({{ i.key }}) is at {{ i.remain }}%.
+              {%- if i.needed > 0 %} This print needs about {{ i.needed | int }} g more of it.{% endif %}
+              {%- if hrs.v is not none and hrs.v > 0 %} {{ hrs.v | round(1) }} h left in the print.{% endif %}
+              Have the next spool ready; the printer will pause at runout.
+              {%- endif -%}
+        - choose: []
+          default: !input notify_action
+  - alias: Remember which spools were warned about in this print
+    if:
+      - condition: template
+        value_template: "{{ store_entity != '' }}"
+    then:
+      - action: input_text.set_value
+        target:
+          entity_id: "{{ store_entity }}"
+        data:
+          value: >-
+            {%- set ns = namespace(keys=already) -%}
+            {%- for a in to_send -%}{%- set ns.keys = ns.keys + [a.key ~ ':' ~ a.event] -%}{%- endfor -%}
+            {%- set keys = ns.keys | unique | list -%}
+            {{ (print_id ~ '|' ~ (keys | join(';')))[:255] }}
