@@ -169,8 +169,9 @@ actually using.
   doesn't count as a new start.
 - **During the print**, it warns when a used spool drops below 10% and stays there for 5
   minutes.
-- **After a Home Assistant restart** mid-print, it checks again for low spools, in case the
-  drop happened while HA was down.
+- **After a Home Assistant restart** mid-print, it runs the start check again for what's left
+  of the print. A restart cancels a start check that's still waiting for the spool to feed,
+  and a drop may have happened while HA was down.
 
 How it decides what the print uses:
 

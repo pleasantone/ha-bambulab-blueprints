@@ -16,8 +16,9 @@ blueprint:
     - **During the print**: when a spool the print uses drops below the threshold and stays
     there for the hold time. Once per spool per print if you give it the optional helper.
 
-    - **After a Home Assistant restart** mid-print: it re-checks for low spools, because the
-    drop may have happened while HA was down.
+    - **After a Home Assistant restart** mid-print: it runs the start check again for what's
+    left of the print, because a restart cancels a start check that's still waiting and a drop
+    may have happened while HA was down. With the helper it won't repeat a warning.
 
 
     "Uses" comes from the per-slot grams on the printer's `print_weight` sensor, which the
@@ -196,15 +197,23 @@ actions:
         id: started
     then:
       - wait_for_trigger:
-          - trigger: state
+          - id: feeding
+            trigger: state
             entity_id: !input tray_sensors
             attribute: active
             to: true
             for: {seconds: 30}
+          - id: ended
+            trigger: state
+            entity_id: !input print_status
+            to: [failed, finish, idle]
         timeout: !input feed_timeout
         continue_on_timeout: true
-      - condition: template
-        value_template: "{{ states(status_entity) in ['running', 'pause'] }}"
+      - alias: Stop if this print ended before feeding (a failed start must not wait into the next print)
+        condition: template
+        value_template: >-
+          {{ (wait.trigger is none or wait.trigger.id == 'feeding')
+             and states(status_entity) in ['running', 'pause'] }}
   - alias: "Restart: give the printer time to reconnect and report its trays"
     if:
       - condition: trigger
@@ -246,7 +255,7 @@ actions:
             {%- set avail = (r / 100 * spool_g) | round(0) if r > 0 and spool_g > 0 else 0 -%}
             {%- set event = namespace(v='') -%}
             {%- if in_print and r > 0 -%}
-              {%- if trigger.id == 'started' and need > 0 and avail > 0 -%}
+              {%- if trigger.id in ['started', 'restart'] and need > 0 and avail > 0 -%}
                 {%- if avail < need -%}{%- set event.v = 'short' -%}
                 {%- elif avail < need + margin / 100 * spool_g -%}{%- set event.v = 'tight' -%}
                 {%- endif -%}
