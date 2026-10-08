@@ -10,6 +10,19 @@ blueprint:
     cutting power, so a print started during the warning doesn't get killed in prepare.
 
 
+    Optional **mode** (an `input_select`), so you can pick per printer from a dashboard:
+
+    - **When print ends**: off a while (10 min by default) after a print finishes or fails, after the usual warning.
+    The idle-time rule still applies too, so a printer you switched on and never used still
+    goes off.
+
+    - **After idle time**: the idle-time rule only.
+
+    - **Stay on**: never.
+
+    Leave the mode empty and it behaves as before (idle time only).
+
+
     Safety checks:
 
     - **Power sensor unreadable?** It notifies and leaves the printer on. An unavailable power
@@ -19,6 +32,7 @@ blueprint:
     is on, or unknown. It checks both before the warning and after it.
 
     - **Optional kill switch**: an `input_boolean` that has to be on for power-down to happen.
+    Works alongside the mode; both have to allow it.
 
 
     Set the idle-power threshold for your printer. Measure its idle draw on your plug's meter
@@ -73,13 +87,67 @@ blueprint:
               multiple: true
               filter:
                 - domain: binary_sensor
+        print_status:
+          name: Print status (optional)
+          description: >
+            The printer's print status sensor (`sensor.<printer>_print_status`). Only needed for
+            the "when print ends" mode. ha-bambulab holds it at `finish` (or `failed`) after a print
+            until the next one starts, and reads `idle` after a power-on, so switching the printer
+            on doesn't count as a print ending.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+    mode_section:
+      name: Mode (optional)
+      icon: mdi:power-settings
+      collapsed: true
+      input:
+        mode_entity:
+          name: Mode selector
+          description: >
+            An `input_select` whose options include the three option names below. Leave empty to
+            always use the idle-time rule.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: input_select
+        mode_after_print:
+          name: '"When print ends" option'
+          description: The option name that means "power off after a print ends".
+          default: When print ends
+          selector:
+            text: {}
+        mode_after_idle:
+          name: '"After idle time" option'
+          description: The option name that means "power off after the idle time only".
+          default: After idle time
+          selector:
+            text: {}
+        mode_never:
+          name: '"Stay on" option'
+          description: The option name that means "never power off automatically".
+          default: Stay on
+          selector:
+            text: {}
+        after_print_time:
+          name: Time after a print
+          description: >
+            In "when print ends" mode, how long after the print finishes. Leaves time to grab the
+            plate or queue another print. Picking the mode on a printer that finished a while ago
+            starts this timer from then.
+          default: {hours: 0, minutes: 10, seconds: 0}
+          selector:
+            duration: {}
     timing_section:
       name: Timing
       icon: mdi:timer-outline
       input:
         idle_time:
           name: Idle time
-          description: How long the printer has to be idle first.
+          description: How long the printer has to be idle first (any mode except "stay on").
           default: {hours: 4, minutes: 0, seconds: 0}
           selector:
             duration: {}
@@ -114,6 +182,11 @@ blueprint:
 
 mode: single
 
+trigger_variables:
+  print_status_entity: !input print_status
+  mode_entity: !input mode_entity
+  mode_after_print: !input mode_after_print
+
 variables:
   stage_entity: !input current_stage
   plug_entity: !input plug
@@ -121,6 +194,9 @@ variables:
   idle_power: !input idle_power
   drying: !input drying_sensors
   toggle_entity: !input enable_toggle
+  status_entity: !input print_status
+  mode_select: !input mode_entity
+  mode_never: !input mode_never
   warning_time: !input warning_time
   notify_tag: "power_{{ plug_entity.split('.')[1] }}"
   warning_text: >-
@@ -129,12 +205,23 @@ variables:
     {{- s ~ ' s' if s < 60 else ((s / 60) | round(1) | string | replace('.0', '')) ~ ' min' }}
 
 triggers:
-  - trigger: state
+  - id: idle
+    trigger: state
     entity_id: !input current_stage
     to: idle
     for: !input idle_time
+  - id: print_ended
+    trigger: template
+    value_template: >-
+      {{ mode_entity != '' and print_status_entity != ''
+         and states(mode_entity) == mode_after_print
+         and states(print_status_entity) in ['finish', 'failed'] }}
+    for: !input after_print_time
 
 conditions:
+  - alias: Mode isn't "stay on" (or no mode configured)
+    condition: template
+    value_template: "{{ not mode_select or states(mode_select) != mode_never }}"
   - alias: Enable toggle on (or none configured)
     condition: template
     value_template: "{{ not toggle_entity or is_state(toggle_entity, 'on') }}"
@@ -166,8 +253,11 @@ actions:
       notify_event: warning
       notify_title: Auto power-down
       notify_message: >-
+        {% if trigger.id == 'print_ended' -%}
+        Print ended {{ relative_time(states[status_entity].last_changed) }} ago.
+        {%- else -%}
         Printer has been idle for {{ relative_time(states[stage_entity].last_changed) }}.
-        Powering down in {{ warning_text }} to save energy.
+        {%- endif %} Powering down in {{ warning_text }} to save energy.
   - choose: []
     default: !input notify_action
 
@@ -182,6 +272,10 @@ actions:
           - condition: template
             value_template: "{{ not is_state(stage_entity, 'idle') }}"
           - condition: template
+            value_template: "{{ mode_select != '' and is_state(mode_select, mode_never) }}"
+          - condition: template
+            value_template: "{{ toggle_entity != '' and not is_state(toggle_entity, 'on') }}"
+          - condition: template
             value_template: >-
               {{ not is_number(states(power_entity)) or states(power_entity) | float >= idle_power }}
     then:
@@ -189,12 +283,17 @@ actions:
           notify_event: cancelled
           notify_title: Auto power-down cancelled
           notify_message: >-
+            {% if (mode_select != '' and is_state(mode_select, mode_never))
+                  or (toggle_entity != '' and not is_state(toggle_entity, 'on')) -%}
+            Auto power-down was switched off during the warning. Left it on.
+            {%- else -%}
             The printer became active during the warning (stage '{{ states(stage_entity) }}',
             {{ states(power_entity) }} W{{ ', AMS drying' if drying | reject('is_state', 'off')
             | list | count > 0 else '' }}). Left it on.
+            {%- endif %}
       - choose: []
         default: !input notify_action
-      - stop: Printer became active during the warning
+      - stop: Cancelled during the warning
 
   - action: switch.turn_off
     target:
@@ -202,5 +301,7 @@ actions:
   - action: logbook.log
     data:
       name: Auto power-down
-      message: "Printer powered off after being idle (energy saving)"
+      message: >-
+        {{ 'Printer powered off after its print ended' if trigger.id == 'print_ended'
+           else 'Printer powered off after being idle' }} (energy saving)
       entity_id: "{{ plug_entity }}"

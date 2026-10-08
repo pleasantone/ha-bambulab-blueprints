@@ -87,6 +87,12 @@ of these exist. This one is paranoid about killing the printer at the wrong time
   reporting unknown. Include the AMS units that have their own power supply. They still need
   the printer on to dry.
 - Optional `input_boolean` kill switch.
+- Optional mode `input_select`: **When print ends** (off 10 min after a print finishes or
+  fails, plus the warning), **After idle time**, or **Stay on**. Nice on a dashboard. Point
+  it at the print status sensor too: ha-bambulab holds that at `finish` after a print and
+  reads `idle` after a power-on, so just switching the printer on doesn't count as a print
+  ending. In "when print ends" mode the idle-time rule still applies, so a printer you turned
+  on and never used still goes off. You name the three options yourself.
 
 Measure your printer's idle draw on the plug and set the threshold comfortably above it. My
 X1C idles around 11 W (I use 20 W); my H2C idles 20–36 W depending on the airduct (I use 45 W).
