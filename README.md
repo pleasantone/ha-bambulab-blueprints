@@ -93,6 +93,13 @@ of these exist. This one is paranoid about killing the printer at the wrong time
   reads `idle` after a power-on, so just switching the printer on doesn't count as a print
   ending. In "when print ends" mode the idle-time rule still applies, so a printer you turned
   on and never used still goes off. You name the three options yourself.
+- Optional restart-safe timing. Plain "idle for 4 hours" timers start over every time Home
+  Assistant restarts or you reload automations. On a box that restarts a lot, the printer never
+  turns off. Give it an `input_datetime` helper (date and time) and it writes down when the
+  printer went idle instead, and checks against that every minute and at startup. Add the
+  printer's end time sensor too, so a print that finished while HA was down still counts. A
+  timestamp older than 3x the idle time (a brand new helper, say) restarts the clock instead of
+  cutting power.
 
 Measure your printer's idle draw on the plug and set the threshold comfortably above it. My
 X1C idles around 11 W (I use 20 W); my H2C idles 20–36 W depending on the airduct (I use 45 W).

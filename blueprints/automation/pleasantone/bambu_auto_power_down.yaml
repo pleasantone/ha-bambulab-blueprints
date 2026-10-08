@@ -23,6 +23,15 @@ blueprint:
     Leave the mode empty and it behaves as before (idle time only).
 
 
+    **Restart-safe timing** (optional, recommended): give it an `input_datetime` helper (date and
+    time) and it stores when the printer went idle instead of relying on a running timer. Plain
+    "idle for 4 h" timers start over on every Home Assistant restart or automation reload; with
+    the helper, a restart doesn't reset the clock, and a deadline that passed while Home Assistant
+    was down is acted on once it's back (still with the warning first). An idle-since more than 3x
+    the idle time old is treated as unset (a fresh helper, or days on "stay on") and restarts the
+    clock instead of cutting power.
+
+
     Safety checks:
 
     - **Power sensor unreadable?** It notifies and leaves the printer on. An unavailable power
@@ -157,6 +166,28 @@ blueprint:
           default: {hours: 0, minutes: 2, seconds: 0}
           selector:
             duration: {}
+        idle_since:
+          name: Idle-since helper (optional, recommended)
+          description: >
+            An `input_datetime` with date and time. The automation writes the moment the printer
+            went idle (a print ending, or the plug being switched on) and counts from there, so
+            Home Assistant restarts don't reset the idle clock. Leave empty for the old behavior.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: input_datetime
+        end_time_sensor:
+          name: Print end time (optional)
+          description: >
+            The printer's end time sensor (`sensor.<printer>_end_time`). Only used with the
+            idle-since helper: if a print finished while Home Assistant was down, the clock counts
+            from whichever is newer, the stored idle time or the print's end.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: sensor
         enable_toggle:
           name: Enable toggle (optional)
           description: An input_boolean that must be on for power-down to happen.
@@ -180,12 +211,19 @@ blueprint:
           selector:
             action: {}
 
-mode: single
+mode: queued
+max: 10
+max_exceeded: silent
 
 trigger_variables:
   print_status_entity: !input print_status
   mode_entity: !input mode_entity
   mode_after_print: !input mode_after_print
+  stage_tv: !input current_stage
+  idle_since_entity: !input idle_since
+  end_entity: !input end_time_sensor
+  idle_time_v: !input idle_time
+  after_print_v: !input after_print_time
 
 variables:
   stage_entity: !input current_stage
@@ -203,8 +241,36 @@ variables:
     {% set s = (warning_time.hours | default(0)) * 3600 + (warning_time.minutes | default(0)) * 60
                + (warning_time.seconds | default(0)) %}
     {{- s ~ ' s' if s < 60 else ((s / 60) | round(1) | string | replace('.0', '')) ~ ' min' }}
+  # Restart-safe timing: when the printer went idle, from the helper or the print's end time.
+  idle_since_ts: >-
+    {% if idle_since_entity == '' %}0{% else %}
+    {%- set m = state_attr(idle_since_entity, 'timestamp') | float(0) -%}
+    {%- set e = as_timestamp(states(end_entity), 0) if end_entity != '' else 0 -%}
+    {{- [m, e if e <= as_timestamp(now()) else 0] | max -}}{% endif %}
+  after_print_due: >-
+    {% set ap = (after_print_v.hours | default(0)) * 3600 + (after_print_v.minutes | default(0)) * 60
+                + (after_print_v.seconds | default(0)) %}
+    {{ idle_since_ts | float(0) > 0 and mode_entity != '' and print_status_entity != ''
+       and states(mode_entity) == mode_after_print
+       and states(print_status_entity) in ['finish', 'failed']
+       and as_timestamp(now()) - idle_since_ts | float(0) >= ap }}
+  idle_seconds: >-
+    {{ (idle_time_v.hours | default(0)) * 3600 + (idle_time_v.minutes | default(0)) * 60
+       + (idle_time_v.seconds | default(0)) }}
+  idle_due: >-
+    {{ idle_since_ts | float(0) > 0 and as_timestamp(now()) - idle_since_ts | float(0) >= idle_seconds | float(0) }}
+  # An idle-since more than 3x the idle time old can't be real (the printer would have been
+  # powered down long ago): it's a fresh helper, or the mode was "stay on" for days.
+  idle_since_stale: >-
+    {{ idle_since_entity != '' and idle_since_ts | float(0) > 0
+       and as_timestamp(now()) - idle_since_ts | float(0) > 3 * idle_seconds | float(0) }}
+  why: >-
+    {% if trigger.id == 'print_ended' %}print_ended
+    {%- elif trigger.id in ['due', 'start'] and after_print_due and not idle_due %}print_ended
+    {%- else %}idle{% endif %}
 
 triggers:
+  # Legacy timers, used only when no idle-since helper is configured.
   - id: idle
     trigger: state
     entity_id: !input current_stage
@@ -217,8 +283,90 @@ triggers:
          and states(mode_entity) == mode_after_print
          and states(print_status_entity) in ['finish', 'failed'] }}
     for: !input after_print_time
+  # Restart-safe timing: record when the printer went idle...
+  - id: mark_idle
+    trigger: state
+    entity_id: !input current_stage
+    not_from: [idle, unavailable, unknown, offline]
+    to: idle
+  - id: mark_power_on
+    trigger: state
+    entity_id: !input plug
+    from: "off"
+    to: "on"
+  # ...and check every minute whether the deadline has passed.
+  - id: due
+    trigger: template
+    value_template: >-
+      {%- if idle_since_entity == '' -%}false{%- else -%}
+      {%- set now_ts = as_timestamp(now()) -%}
+      {%- set m = state_attr(idle_since_entity, 'timestamp') | float(0) -%}
+      {%- set e = as_timestamp(states(end_entity), 0) if end_entity != '' else 0 -%}
+      {%- set since = [m, e if e <= now_ts else 0] | max -%}
+      {%- set it = (idle_time_v.hours | default(0)) * 3600 + (idle_time_v.minutes | default(0)) * 60 + (idle_time_v.seconds | default(0)) -%}
+      {%- set ap = (after_print_v.hours | default(0)) * 3600 + (after_print_v.minutes | default(0)) * 60 + (after_print_v.seconds | default(0)) -%}
+      {%- set after_print = mode_entity != '' and print_status_entity != '' and states(mode_entity) == mode_after_print and states(print_status_entity) in ['finish', 'failed'] -%}
+      {{ since > 0 and is_state(stage_tv, 'idle') and (now_ts - since >= it or (after_print and now_ts - since >= ap)) }}
+      {%- endif -%}
+  # A deadline can pass while Home Assistant is down; check again at start and after reloads.
+  - id: start
+    trigger: homeassistant
+    event: start
+  - id: start
+    trigger: event
+    event_type: automation_reloaded
 
-conditions:
+actions:
+  - alias: Record when the printer went idle (restart-safe timing)
+    if:
+      - condition: trigger
+        id: [mark_idle, mark_power_on]
+    then:
+      - if:
+          - condition: template
+            value_template: "{{ idle_since_entity != '' }}"
+        then:
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: "{{ idle_since_entity }}"
+            data:
+              timestamp: "{{ as_timestamp(now()) }}"
+      - stop: Recorded the idle start
+
+  - alias: With an idle-since helper, the legacy timers are ignored
+    if:
+      - condition: trigger
+        id: [idle, print_ended]
+      - condition: template
+        value_template: "{{ idle_since_entity != '' }}"
+    then:
+      - stop: Restart-safe timing is in use
+
+  - alias: At start or reload, only continue if a deadline has passed
+    if:
+      - condition: trigger
+        id: start
+      - condition: template
+        value_template: >-
+          {{ idle_since_entity == '' or not is_state(stage_entity, 'idle')
+             or not (idle_due or after_print_due) }}
+    then:
+      - stop: Nothing due
+
+  - alias: A stale idle-since restarts the clock instead of cutting power
+    if:
+      - condition: trigger
+        id: [due, start]
+      - condition: template
+        value_template: "{{ idle_since_stale }}"
+    then:
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: "{{ idle_since_entity }}"
+        data:
+          timestamp: "{{ as_timestamp(now()) }}"
+      - stop: Idle-since was stale; restarted the clock
+
   - alias: Mode isn't "stay on" (or no mode configured)
     condition: template
     value_template: "{{ not mode_select or states(mode_select) != mode_never }}"
@@ -229,7 +377,6 @@ conditions:
     condition: template
     value_template: "{{ drying | reject('is_state', 'off') | list | count == 0 }}"
 
-actions:
   - alias: "Guard: power unreadable - notify, never silently skip"
     if:
       - condition: template
@@ -253,7 +400,11 @@ actions:
       notify_event: warning
       notify_title: Auto power-down
       notify_message: >-
-        {% if trigger.id == 'print_ended' -%}
+        {%- set since = idle_since_ts | float(0) -%}
+        {%- if since > 0 -%}
+        {%- set ago = relative_time(as_datetime(since)) -%}
+        {{ ('Print ended ' ~ ago ~ ' ago.') if why == 'print_ended' else ('Printer has been idle for ' ~ ago ~ '.') }}
+        {%- elif why == 'print_ended' -%}
         Print ended {{ relative_time(states[status_entity].last_changed) }} ago.
         {%- else -%}
         Printer has been idle for {{ relative_time(states[stage_entity].last_changed) }}.
@@ -302,6 +453,6 @@ actions:
     data:
       name: Auto power-down
       message: >-
-        {{ 'Printer powered off after its print ended' if trigger.id == 'print_ended'
+        {{ 'Printer powered off after its print ended' if why == 'print_ended'
            else 'Printer powered off after being idle' }} (energy saving)
       entity_id: "{{ plug_entity }}"
