@@ -30,6 +30,16 @@ blueprint:
     - the printer has been **offline or unavailable for an hour**. A printer that drops off
     the network mid-print keeps printing, so a shorter window would cool the chamber under a
     live print. A network drop never counts as "not printing" for the other exits.
+
+
+    **Optional device auto-off keepalive:** if your plug or relay has its own auto-off timer
+    (Shelly calls it "Automatic OFF"), set that to something short like 30 minutes and turn
+    this on. While the heater is on, this re-sends "on" every few minutes, which restarts the
+    device's timer. If HA goes down, hangs, or this automation is turned off, the heater
+    switches itself off when the device timer runs out. List your over-temperature automation
+    under "Only while these are on" and turning that one off stops the heater too. Check
+    that your device restarts its timer on a repeated "on" (Shelly Gen2+ does) before relying
+    on it.
   domain: automation
   source_url: https://github.com/pleasantone/ha-bambulab-blueprints/blob/main/blueprints/automation/pleasantone/bambu_chamber_heater.yaml
   homeassistant:
@@ -110,6 +120,41 @@ blueprint:
           default: {hours: 1, minutes: 0, seconds: 0}
           selector:
             duration: {}
+    keepalive_section:
+      name: Device auto-off keepalive (optional)
+      icon: mdi:timer-refresh-outline
+      collapsed: true
+      input:
+        keepalive:
+          name: Keep the device's auto-off timer from running out while the heater is on
+          description: >-
+            Only for a plug or relay with its own auto-off timer set. Without one this does
+            nothing useful. Without HA, the heater turns off when that timer runs out, so make
+            it longer than the interval below plus a restart, and never longer than you'd
+            trust the heater to run unwatched.
+          default: false
+          selector:
+            boolean: {}
+        keepalive_every:
+          name: Re-send "on" every
+          default: "/10"
+          selector:
+            select:
+              options:
+                - {label: 5 minutes, value: "/5"}
+                - {label: 10 minutes, value: "/10"}
+                - {label: 15 minutes, value: "/15"}
+        keepalive_requires:
+          name: Only while these are on
+          description: >-
+            Automations that must be enabled for the keepalive to run, such as your chamber
+            over-temperature safety. Turn one off and the device timer is allowed to run out.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain: automation
 
 mode: single
 
@@ -117,6 +162,7 @@ variables:
   heater_entity: !input heater
   chamber_entity: !input chamber_temp
   max_start_chamber: !input max_start_chamber
+  keepalive_requires: !input keepalive_requires
 
 triggers:
   - trigger: numeric_state
@@ -143,6 +189,10 @@ triggers:
     to: "on"
     for: !input idle_backstop
     id: on_without_print
+  - trigger: time_pattern
+    minutes: !input keepalive_every
+    id: keepalive
+    enabled: !input keepalive
 
 actions:
   - choose:
@@ -188,3 +238,21 @@ actions:
               name: Chamber heater
               message: "Turned off ({{ trigger.id }})"
               entity_id: "{{ heater_entity }}"
+
+      - alias: Keepalive - restart the device's own auto-off timer
+        conditions:
+          - condition: trigger
+            id: keepalive
+          - condition: state
+            entity_id: !input heater
+            state: "on"
+          # A template because the list may be empty (state conditions need an entity).
+          - condition: template
+            value_template: >-
+              {% set req = [keepalive_requires] if keepalive_requires is string
+                 else keepalive_requires %}
+              {{ req | reject('is_state', 'on') | list | count == 0 }}
+        sequence:
+          - action: homeassistant.turn_on
+            target:
+              entity_id: !input heater

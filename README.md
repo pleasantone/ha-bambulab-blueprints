@@ -120,6 +120,15 @@ soak time.
 A printer that drops off the network mid-print keeps printing, so offline/unavailable only turns
 the heater off after an hour. It never counts as "not printing" for the other exits.
 
+All of that only works while HA is running. If HA hangs, or someone turns the automation off,
+the heater stays on. If your relay has its own auto-off timer, there's an optional keepalive
+for that: I set my Shelly's "Automatic OFF" to 30 minutes, and while the heater is on the
+blueprint re-sends "on" every 10 minutes, which restarts the Shelly's timer. If HA goes away,
+or I turn off this automation or the over-temperature one, the heater switches itself off
+within half an hour. That costs the rest of the print's chamber heat if HA is down that long,
+which is the trade I want. Check that your device restarts its timer on a repeated "on" before
+you rely on it. Shelly Gen2+ does; I tested mine.
+
 **Your heater still needs its own thermostat or thermal fuse.** This is control, not safety.
 
 ### Chamber over-temperature safety
